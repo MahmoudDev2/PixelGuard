@@ -8,5 +8,7 @@ This project aims to devise a method of detecting tampered images using modern A
 1. Error Level Analysis (ELA)
 2. Convolutional Neural Networks (CNN)
 
+# Contributors
+Made with <3 by Vardhaman Munot,Aniket Dubey,Jash Shah, Prince Tibadia
 
 
