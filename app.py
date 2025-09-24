@@ -1,30 +1,33 @@
 from flask import Flask, render_template, request, redirect, url_for,session, send_from_directory
 from flask_sqlalchemy import SQLAlchemy
-from keras.models import load_model
+from tensorflow.keras.models import Sequential
+from mantranet_model import load_trained_model
 import numpy as np
 import os
 np.random.seed(2)
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import confusion_matrix
-from keras.utils.np_utils import to_categorical
-from keras.models import Sequential
-from keras.layers import Dense, Flatten, Conv2D, MaxPool2D, Dropout
-from keras.optimizers import Adam
-from keras.preprocessing.image import ImageDataGenerator
-from keras.callbacks import EarlyStopping
+from tensorflow.keras.utils import to_categorical
+from tensorflow.keras.layers import Dense, Flatten, Conv2D, MaxPool2D, Dropout
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras.callbacks import EarlyStopping
 from numpy import loadtxt
 from PIL import Image, ImageChops, ImageEnhance
 import itertools
 from sqlalchemy.orm import backref
 from io import BytesIO
 import re
+import cv2
 
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///users.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['SECRET_KEY'] = 'secret-key'
 #app.run(debug=True)
-model = load_model("model_casia_run1.h5")
+# The user must download ManTraNet_Ptrain4.h5 and place it in the root directory.
+# Link: https://raw.githubusercontent.com/neelanjan00/Image-Forgery-Detection/master/ManTraNet_Ptrain4.h5
+model = load_trained_model()
 # app.config['UPLOAD_FOLDER'] = r'uploads'
 db = SQLAlchemy(app)
 
@@ -53,10 +56,6 @@ def index():
 # @app.route('/login')
 # def login():
 #     return render_template('login.html')
-
-@app.before_first_request
-def create_tables():
-    db.create_all()
 
 @app.route('/signup', methods=['GET', 'POST'])
 def signup():
@@ -119,49 +118,48 @@ def upload_image():
         return render_template('home.html',user=user,msg=msg)
     file.save('static/' + file.filename)
 
-    # Preprocess the image
-    global image
-    path = 'static/' + file.filename
-    image1= prepare_image(path)
-    image = image1.reshape(-1, 128, 128, 3)
-    y_pred = model.predict(image)
-    class_names = ['Tampered', 'Original']
-    y_pred_class = np.argmax(y_pred, axis = 1)[0]
-    print(f'Class: {class_names[y_pred_class]} Confidence: {np.amax(y_pred) * 100:0.2f}')
-    if (class_names[y_pred_class]) == 'Original':
-            image = Images(filename=file.filename, data=file.read(),user=user)
-            db.session.add(image)
-            db.session.commit()
-    return render_template('home.html',result = class_names[y_pred_class], images = file.filename)
-image_size = (128, 128)
+    # Preprocess the image using ManTraNet's approach
+    image_array = prepare_image(file)
 
-def prepare_image(image):
-    # Convert the image to ELA and resize it to the desired size
-    ela_image = ela(image, 90)
-    resized_ela_image = ela_image.resize(image_size)
+    # Predict the mask
+    predicted_mask = model.predict(image_array)[0, ..., 0]
 
-    # Flatten the image and normalize its pixel values
-    flattened_image = np.array(resized_ela_image).flatten() / 255.0
+    # Save the original image and the predicted mask overlay
+    file.seek(0) # Reset file pointer after reading in prepare_image
+    original_image = cv2.imdecode(np.frombuffer(file.read(), np.uint8), cv2.IMREAD_UNCHANGED)
 
-    return flattened_image
-def ela(path, quality):
-    temp_filename = 'temp_file_name.jpg'
-    ela_filename = 'temp_ela.png'
-    image = Image.open(path).convert('RGB')
-    image.save(path, 'JPEG', quality = quality)
-    temp_image = Image.open(path)
+    # To display, we might need to use matplotlib to save the overlay
+    import matplotlib.pyplot as plt
+    plt.ioff()  # Turn off interactive mode
+    fig = plt.figure(frameon=False)
+    ax = plt.Axes(fig, [0., 0., 1., 1.])
+    ax.set_axis_off()
+    fig.add_axes(ax)
 
-    ela_image = ImageChops.difference(image, temp_image)
+    ax.imshow(original_image)
+    ax.imshow(predicted_mask, cmap='jet', alpha=0.5)
 
-    extrema = ela_image.getextrema()
-    max_diff = max([ex[1] for ex in extrema])
-    if max_diff == 0:
-        max_diff = 1
-    scale = 255.0 / max_diff
+    mask_filename = 'mask_' + file.filename
+    mask_path = os.path.join('static', mask_filename)
+    fig.savefig(mask_path, bbox_inches='tight', pad_inches=0)
+    plt.close(fig)
 
-    ela_image = ImageEnhance.Brightness(ela_image).enhance(scale)
+    # For now, just return the path to the mask
+    return render_template('home.html', result_mask=mask_filename, images=file.filename)
 
-    return ela_image
+def prepare_image(image_file):
+    # Read image using OpenCV
+    img_array = np.frombuffer(image_file.read(), np.uint8)
+    img = cv2.imdecode(img_array, cv2.IMREAD_UNCHANGED)
+
+    # ManTraNet preprocessing
+    # Convert to float32, normalize to [-1, 1], and add batch dimension
+    x = np.expand_dims(img.astype('float32') / 255. * 2 - 1, axis=0)
+
+    # Reset the file pointer to be able to read it again for saving
+    image_file.seek(0)
+
+    return x
 @app.route('/view', methods=['GET','POST'])
 def show_image():
     user = User.query.filter_by(username=session['username']).first()
@@ -180,5 +178,7 @@ def logout():
     return redirect(url_for('index'))    
 
 if __name__ == '__main__':
-    db.create_all()
-    #app.run(debug=True)
+    # This block is intentionally left empty.
+    # The app is run via a WSGI server like gunicorn,
+    # and the database is initialized via a separate command.
+    pass
