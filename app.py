@@ -1,7 +1,6 @@
 from flask import Flask, render_template, request, redirect, url_for,session, send_from_directory
 from flask_sqlalchemy import SQLAlchemy
-from tensorflow.keras.models import Sequential
-from mantranet_model import load_trained_model
+from tensorflow.keras.models import load_model, Sequential
 import numpy as np
 import os
 np.random.seed(2)
@@ -18,16 +17,15 @@ import itertools
 from sqlalchemy.orm import backref
 from io import BytesIO
 import re
-import cv2
 
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///users.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['SECRET_KEY'] = 'secret-key'
 #app.run(debug=True)
-# The user must download ManTraNet_Ptrain4.h5 and place it in the root directory.
-# Link: https://raw.githubusercontent.com/neelanjan00/Image-Forgery-Detection/master/ManTraNet_Ptrain4.h5
-model = load_trained_model()
+# The user must download the IFAKE model and name it 'ifake_image_model.h5'
+# Link: https://drive.google.com/drive/folders/1B4ODeK_QQ6XMFo6i6EEup1nZC6PllVfu?usp=sharing
+model = load_model("ifake_image_model.h5")
 # app.config['UPLOAD_FOLDER'] = r'uploads'
 db = SQLAlchemy(app)
 
@@ -118,48 +116,49 @@ def upload_image():
         return render_template('home.html',user=user,msg=msg)
     file.save('static/' + file.filename)
 
-    # Preprocess the image using ManTraNet's approach
-    image_array = prepare_image(file)
+    # Preprocess the image
+    global image
+    path = 'static/' + file.filename
+    image1= prepare_image(path)
+    image = image1.reshape(-1, 128, 128, 3)
+    y_pred = model.predict(image)
+    class_names = ['Tampered', 'Original']
+    y_pred_class = np.argmax(y_pred, axis = 1)[0]
+    print(f'Class: {class_names[y_pred_class]} Confidence: {np.amax(y_pred) * 100:0.2f}')
+    if (class_names[y_pred_class]) == 'Original':
+            image = Images(filename=file.filename, data=file.read(),user=user)
+            db.session.add(image)
+            db.session.commit()
+    return render_template('home.html',result = class_names[y_pred_class], images = file.filename)
+image_size = (128, 128)
 
-    # Predict the mask
-    predicted_mask = model.predict(image_array)[0, ..., 0]
+def prepare_image(image):
+    # Convert the image to ELA and resize it to the desired size
+    ela_image = ela(image, 90)
+    resized_ela_image = ela_image.resize(image_size)
 
-    # Save the original image and the predicted mask overlay
-    file.seek(0) # Reset file pointer after reading in prepare_image
-    original_image = cv2.imdecode(np.frombuffer(file.read(), np.uint8), cv2.IMREAD_UNCHANGED)
+    # Flatten the image and normalize its pixel values
+    flattened_image = np.array(resized_ela_image).flatten() / 255.0
 
-    # To display, we might need to use matplotlib to save the overlay
-    import matplotlib.pyplot as plt
-    plt.ioff()  # Turn off interactive mode
-    fig = plt.figure(frameon=False)
-    ax = plt.Axes(fig, [0., 0., 1., 1.])
-    ax.set_axis_off()
-    fig.add_axes(ax)
+    return flattened_image
+def ela(path, quality):
+    temp_filename = 'temp_file_name.jpg'
+    ela_filename = 'temp_ela.png'
+    image = Image.open(path).convert('RGB')
+    image.save(path, 'JPEG', quality = quality)
+    temp_image = Image.open(path)
 
-    ax.imshow(original_image)
-    ax.imshow(predicted_mask, cmap='jet', alpha=0.5)
+    ela_image = ImageChops.difference(image, temp_image)
 
-    mask_filename = 'mask_' + file.filename
-    mask_path = os.path.join('static', mask_filename)
-    fig.savefig(mask_path, bbox_inches='tight', pad_inches=0)
-    plt.close(fig)
+    extrema = ela_image.getextrema()
+    max_diff = max([ex[1] for ex in extrema])
+    if max_diff == 0:
+        max_diff = 1
+    scale = 255.0 / max_diff
 
-    # For now, just return the path to the mask
-    return render_template('home.html', result_mask=mask_filename, images=file.filename)
+    ela_image = ImageEnhance.Brightness(ela_image).enhance(scale)
 
-def prepare_image(image_file):
-    # Read image using OpenCV
-    img_array = np.frombuffer(image_file.read(), np.uint8)
-    img = cv2.imdecode(img_array, cv2.IMREAD_UNCHANGED)
-
-    # ManTraNet preprocessing
-    # Convert to float32, normalize to [-1, 1], and add batch dimension
-    x = np.expand_dims(img.astype('float32') / 255. * 2 - 1, axis=0)
-
-    # Reset the file pointer to be able to read it again for saving
-    image_file.seek(0)
-
-    return x
+    return ela_image
 @app.route('/view', methods=['GET','POST'])
 def show_image():
     user = User.query.filter_by(username=session['username']).first()
